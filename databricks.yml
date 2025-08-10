@@ -1,0 +1,31 @@
+# This is a Databricks asset bundle definition for databricks.
+# The Databricks extension requires databricks.yml configuration file.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+
+bundle:
+  name: workspace
+
+variables:
+  catalog_name:
+    description: The catalog name to save the trained model
+    default: system
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-51a96bc5-edf3.cloud.databricks.com
+    variables:
+      catalog_name: workspace # override catalog name for dev target
+    run_as:
+      user_name: ${workspace.current_user.userName}
+
+  ## Optionally, there could be 'staging' or 'prod' targets here.
+  #
+  # prod:
+  #   workspace:
+  #     host: https://dbc-51a96bc5-edf3.cloud.databricks.com
