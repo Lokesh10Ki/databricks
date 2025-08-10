@@ -1,104 +1,68 @@
+import logging
 import os
-from databricks import sql
-import pandas as pd
-import dash
-from dash import dcc, html, Input, Output, State
-import plotly.express as px
-import dash_bootstrap_components as dbc
-import dash_ag_grid as dag
-from databricks.sdk.core import Config
+import streamlit as st
+# ...existing code...
+# from databricks.sdk import WorkspaceClient
+# from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
+from langchain_community.llms import Databricks
+# ...existing code...
 
-# Ensure environment variable is set correctly
-assert os.getenv('DATABRICKS_WAREHOUSE_ID'), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml."
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def sqlQuery(query: str) -> pd.DataFrame:
-    """Execute a SQL query and return the result as a pandas DataFrame."""
-    cfg = Config()  # Pull environment variables for auth
-    with sql.connect(
-        server_hostname=cfg.host,
-        http_path=f"/sql/1.0/warehouses/{os.getenv('DATABRICKS_WAREHOUSE_ID')}",
-        credentials_provider=lambda: cfg.authenticate
-    ) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query)
-            return cursor.fetchall_arrow().to_pandas()
+# Remove WorkspaceClient and SERVING_ENDPOINT assertion
+# w = WorkspaceClient()
+# assert os.getenv('SERVING_ENDPOINT'), "SERVING_ENDPOINT must be set in resource yaml."
 
-# Fetch the data
-try:
-    # This example query depends on the nyctaxi data set in Unity Catalog, see https://docs.databricks.com/en/discover/databricks-datasets.html for details
-    data = sqlQuery("SELECT * FROM samples.nyctaxi.trips LIMIT 5000")
-    print(f"Data shape: {data.shape}")
-    print(f"Data columns: {data.columns}")
-except Exception as e:
-    print(f"An error occurred in querying data: {str(e)}")
-    data = pd.DataFrame()
+# Initialize LangChain Databricks LLM with your existing endpoint
+LLM_ENDPOINT_NAME = "databricks-meta-llama-3-3-70b-instruct"
+llm = Databricks(endpoint_name=LLM_ENDPOINT_NAME)
 
-def calculate_fare_prediction(pickup, dropoff):
-    """Calculate the predicted fare based on pickup and dropoff zipcodes."""
-    d = data[(data['pickup_zip'] == int(pickup)) & (data['dropoff_zip'] == int(dropoff))]
-    fare_prediction = d['fare_amount'].mean() if len(d) > 0 else 99
-    return f"Predicted Fare: ${fare_prediction:.2f}"
+def get_user_info():
+    headers = st.context.headers
+    return dict(
+        user_name=headers.get("X-Forwarded-Preferred-Username"),
+        user_email=headers.get("X-Forwarded-Email"),
+        user_id=headers.get("X-Forwarded-User"),
+    )
 
-# Initialize the Dash app with Bootstrap styling
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+user_info = get_user_info()
 
-# Define the app layout
-app.layout = dbc.Container([
-    dbc.Row([dbc.Col(html.H1("Taxi Fare Distribution"), width=12)]),
-    dbc.Row([
-        dbc.Col([
-            dcc.Graph(
-                id='fare-scatter',
-                figure=px.scatter(
-                    data,
-                    x='trip_distance',
-                    y='fare_amount',
-                    labels={'fare_amount': 'Fare', 'trip_distance': 'Distance'}
-                ),
-                style={'height': '400px', 'width': '100%'}
-            )
-        ], width=8),
-        dbc.Col([
-            html.H3("Predict Fare"),
-            dbc.Label("From (zipcode)"),
-            dbc.Input(id='from-zipcode', type='text', value='10003'),
-            dbc.Label("To (zipcode)"),
-            dbc.Input(id='to-zipcode', type='text', value='11238'),
-            dbc.Button("Predict", id='submit-button', n_clicks=0, color='primary', className='mt-3'),
-            html.Div(
-                id='prediction-output',
-                className='mt-3',
-                style={'font-size': '24px', 'font-weight': 'bold'}
-            )
-        ], width=4)
-    ]),
-    dbc.Row([
-        dbc.Col([
-            dag.AgGrid(
-                id='data-grid',
-                columnDefs=[{"headerName": col, "field": col} for col in data.columns],
-                rowData=data.to_dict('records'),
-                defaultColDef={"sortable": True, "filter": True, "resizable": True},
-                style={'height': '400px', 'width': '100%'}
-            )
-        ], width=12)
-    ])
-], fluid=True)
+# Streamlit app
+if "visibility" not in st.session_state:
+    st.session_state.visibility = "visible"
+    st.session_state.disabled = False
 
-@app.callback(
-    Output('prediction-output', 'children'),
-    Input('submit-button', 'n_clicks'),
-    State('from-zipcode', 'value'),
-    State('to-zipcode', 'value')
-)
-def render_prediction(n_clicks, pickup, dropoff):
-    return calculate_fare_prediction(pickup, dropoff)
+st.title("🧱 Chatbot App")
+st.write(f"Hi {user_info['user_name']}, this is a basic chatbot using your own serving endpoint")
 
-if __name__ == "__main__":
-    # Calculate initial prediction
-    initial_prediction = calculate_fare_prediction('10003', '11238')
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-    # Set initial value for prediction-output
-    app.layout.children[1].children[1].children[-1].children = initial_prediction
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-    app.run_server(debug=True)
+# Accept user input
+if prompt := st.chat_input("What is up?"):
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Display assistant response
+    with st.chat_message("assistant"):
+        try:
+            # Simple instruction prefix; include more context/history if desired
+            assistant_response = llm.invoke(f"You are a helpful assistant.\nUser: {prompt}")
+            st.markdown(assistant_response)
+        except Exception as e:
+            assistant_response = f"Error querying model: {e}"
+            st.error(assistant_response)
+
+    # Add assistant response to chat history
+    st.session_state.messages.append({"role": "assistant", "content": assistant_response})
