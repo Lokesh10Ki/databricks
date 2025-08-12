@@ -6,3 +6,6 @@ databricks-sql-connector
 databricks-sdk
 python-dotenv
 dash-ag-grid
+streamlit
+langchain-community>=0.2.12
+pyarrow

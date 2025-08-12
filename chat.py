@@ -1,104 +1,130 @@
+import logging
 import os
-from databricks import sql
+import re
 import pandas as pd
-import dash
-from dash import dcc, html, Input, Output, State
-import plotly.express as px
-import dash_bootstrap_components as dbc
-import dash_ag_grid as dag
+import streamlit as st
+from databricks import sql
 from databricks.sdk.core import Config
+from langchain_community.llms import Databricks
 
-# Ensure environment variable is set correctly
-assert os.getenv('DATABRICKS_WAREHOUSE_ID'), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml."
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def sqlQuery(query: str) -> pd.DataFrame:
-    """Execute a SQL query and return the result as a pandas DataFrame."""
-    cfg = Config()  # Pull environment variables for auth
+LLM_ENDPOINT_NAME = "databricks-meta-llama-3-3-70b-instruct"
+
+# Helpers
+def run_sql(query: str) -> pd.DataFrame:
+    cfg = Config()  # uses DATABRICKS_HOST/TOKEN from env
+    http_path = f"/sql/1.0/warehouses/{os.getenv('DATABRICKS_WAREHOUSE_ID')}"
     with sql.connect(
         server_hostname=cfg.host,
-        http_path=f"/sql/1.0/warehouses/{os.getenv('DATABRICKS_WAREHOUSE_ID')}",
+        http_path=http_path,
         credentials_provider=lambda: cfg.authenticate
-    ) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query)
-            return cursor.fetchall_arrow().to_pandas()
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            try:
+                return cur.fetchall_arrow().to_pandas()
+            except Exception:
+                return pd.DataFrame()
 
-# Fetch the data
-try:
-    # This example query depends on the nyctaxi data set in Unity Catalog, see https://docs.databricks.com/en/discover/databricks-datasets.html for details
-    data = sqlQuery("SELECT * FROM samples.nyctaxi.trips LIMIT 5000")
-    print(f"Data shape: {data.shape}")
-    print(f"Data columns: {data.columns}")
-except Exception as e:
-    print(f"An error occurred in querying data: {str(e)}")
-    data = pd.DataFrame()
+def get_trips_schema_text() -> str:
+    try:
+        df = run_sql("DESCRIBE TABLE samples.nyctaxi.trips")
+        df = df[df["col_name"].notna() & df["data_type"].notna()]
+        cols = [f"{r.col_name} {r.data_type}" for _, r in df.iterrows()]
+        return "Columns:\n- " + "\n- ".join(cols)
+    except Exception as e:
+        logger.warning(f"Could not fetch schema: {e}")
+        # Fallback minimal schema
+        return (
+            "Columns:\n"
+            "- trip_distance double\n- fare_amount double\n"
+            "- pickup_zip int\n- dropoff_zip int\n- pickup_datetime timestamp\n- dropoff_datetime timestamp"
+        )
 
-def calculate_fare_prediction(pickup, dropoff):
-    """Calculate the predicted fare based on pickup and dropoff zipcodes."""
-    d = data[(data['pickup_zip'] == int(pickup)) & (data['dropoff_zip'] == int(dropoff))]
-    fare_prediction = d['fare_amount'].mean() if len(d) > 0 else 99
-    return f"Predicted Fare: ${fare_prediction:.2f}"
+def extract_sql(text: str) -> str:
+    m = re.search(r"```sql(.*?)```", text, flags=re.S | re.I)
+    if m:
+        return m.group(1).strip().rstrip(";")
+    # fallback: take first line ending with FROM trips ...
+    return text.strip().rstrip(";")
 
-# Initialize the Dash app with Bootstrap styling
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+def generate_sql(question: str, schema_text: str, llm: Databricks) -> str:
+    prompt = f"""
+You are a Databricks SQL expert. Write a single SQL query for Databricks SQL to answer the user's question
+using ONLY the table samples.nyctaxi.trips. Use the schema below. Return ONLY the SQL in a fenced ```sql block.
 
-# Define the app layout
-app.layout = dbc.Container([
-    dbc.Row([dbc.Col(html.H1("Taxi Fare Distribution"), width=12)]),
-    dbc.Row([
-        dbc.Col([
-            dcc.Graph(
-                id='fare-scatter',
-                figure=px.scatter(
-                    data,
-                    x='trip_distance',
-                    y='fare_amount',
-                    labels={'fare_amount': 'Fare', 'trip_distance': 'Distance'}
-                ),
-                style={'height': '400px', 'width': '100%'}
-            )
-        ], width=8),
-        dbc.Col([
-            html.H3("Predict Fare"),
-            dbc.Label("From (zipcode)"),
-            dbc.Input(id='from-zipcode', type='text', value='10003'),
-            dbc.Label("To (zipcode)"),
-            dbc.Input(id='to-zipcode', type='text', value='11238'),
-            dbc.Button("Predict", id='submit-button', n_clicks=0, color='primary', className='mt-3'),
-            html.Div(
-                id='prediction-output',
-                className='mt-3',
-                style={'font-size': '24px', 'font-weight': 'bold'}
-            )
-        ], width=4)
-    ]),
-    dbc.Row([
-        dbc.Col([
-            dag.AgGrid(
-                id='data-grid',
-                columnDefs=[{"headerName": col, "field": col} for col in data.columns],
-                rowData=data.to_dict('records'),
-                defaultColDef={"sortable": True, "filter": True, "resizable": True},
-                style={'height': '400px', 'width': '100%'}
-            )
-        ], width=12)
-    ])
-], fluid=True)
+Schema:
+{schema_text}
 
-@app.callback(
-    Output('prediction-output', 'children'),
-    Input('submit-button', 'n_clicks'),
-    State('from-zipcode', 'value'),
-    State('to-zipcode', 'value')
-)
-def render_prediction(n_clicks, pickup, dropoff):
-    return calculate_fare_prediction(pickup, dropoff)
+Guidelines:
+- Prefer simple SELECT with WHERE/GROUP BY.
+- Limit to at most 200 rows.
+- Use fully qualified table name samples.nyctaxi.trips.
+- If the question is ambiguous, make a reasonable assumption.
 
-if __name__ == "__main__":
-    # Calculate initial prediction
-    initial_prediction = calculate_fare_prediction('10003', '11238')
+Question:
+{question}
+"""
+    raw = llm.invoke(prompt)
+    return extract_sql(raw)
 
-    # Set initial value for prediction-output
-    app.layout.children[1].children[1].children[-1].children = initial_prediction
+def summarize_answer(question: str, df: pd.DataFrame, llm: Databricks) -> str:
+    sample = df.head(10)
+    csv_preview = sample.to_csv(index=False)
+    prompt = f"""
+You are a helpful analyst. Given the user's question and CSV preview of query results,
+produce a concise answer. If data is insufficient, say so.
 
-    app.run_server(debug=True)
+Question:
+{question}
+
+CSV preview (up to 10 rows):
+{csv_preview}
+"""
+    return llm.invoke(prompt)
+
+# App
+missing = [k for k in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_WAREHOUSE_ID") if not os.getenv(k)]
+if missing:
+    st.warning(f"Missing env vars: {', '.join(missing)}")
+
+llm = Databricks(endpoint_name=LLM_ENDPOINT_NAME)
+schema_text = get_trips_schema_text()
+
+st.title("🧱 NYCTaxi Q&A (samples.nyctaxi.trips)")
+st.caption(f"Endpoint: {LLM_ENDPOINT_NAME}")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# show history
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+if question := st.chat_input("Ask about the taxi trips data..."):
+    st.session_state.messages.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+        try:
+            sql_text = generate_sql(question, schema_text, llm)
+            st.markdown("Proposed SQL:")
+            st.code(sql_text, language="sql")
+
+            df = run_sql(f"{sql_text} LIMIT 200")
+            if df.empty:
+                answer = "No rows returned or query failed."
+                st.warning(answer)
+            else:
+                st.dataframe(df, use_container_width=True)
+                answer = summarize_answer(question, df, llm)
+                st.markdown(answer)
+        except Exception as e:
+            answer = f"Error: {e}"
+            st.error(answer)
+
+    st.session_state.messages.append({"role": "assistant", "content": answer})

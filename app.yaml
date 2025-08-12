@@ -6,3 +6,7 @@ command: [
 env:
   - name: "DATABRICKS_WAREHOUSE_ID"
     valueFrom: "sql-warehouse"
+  - name: "DATABRICKS_HOST"
+    value: "https://dbc-51a96bc5-edf3.cloud.databricks.com/"          # e.g., https://adb-1234567890123456.12.azuredatabricks.net
+  - name: "DATABRICKS_TOKEN"
+    value: "dapic27773b6e85bb754f627f930f64cf9fa"               # or reference a secret if you have one
