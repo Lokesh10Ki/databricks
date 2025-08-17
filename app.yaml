@@ -10,3 +10,9 @@ env:
     value: "https://dbc-51a96bc5-edf3.cloud.databricks.com/"          # e.g., https://adb-1234567890123456.12.azuredatabricks.net
   - name: "DATABRICKS_TOKEN"
     value: "dapic27773b6e85bb754f627f930f64cf9fa"               # or reference a secret if you have one
+  - nam: EMBEDDING_ENDPOINT
+    value: "databricks-gte-large-en"  # e.g., databricks-gte-large-en
+  - name: RAG_VS_ENDPOINT
+    value: "rag-endpoint"  # e.g., rag-endpoint
+  - name: RAG_VS_INDEX
+    value: "workspace.rag.docs_index"  # e.g., workspace.rag.docs

@@ -3,12 +3,15 @@ import os
 import re
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv  
 from databricks import sql
 from databricks.sdk.core import Config
 from langchain_community.llms import Databricks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+load_dotenv()  # Load environment variables from .env file
 
 LLM_ENDPOINT_NAME = "databricks-meta-llama-3-3-70b-instruct"
 

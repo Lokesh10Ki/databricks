@@ -17,6 +17,8 @@ from llm import (
     ensure_limit,
 )
 
+from rag import ingest_uploaded_files, retrieve_context
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -53,7 +55,7 @@ def df_to_table(df: pd.DataFrame, max_rows: int = 30):
     ], style={"width": "100%", "overflowX": "auto"})
 
 app.layout = dbc.Container([
-    html.H3("🧱 NYCTaxi Q&A (samples.nyctaxi.trips)"),
+    html.H3("🧱 POC - Databricks AI Intelligence (samples.nyctaxi.trips)"),
 
     dbc.Row([
         dbc.Col([
@@ -64,6 +66,20 @@ app.layout = dbc.Container([
                 value=DEFAULT_ENDPOINT,
                 clearable=False,
             ),
+        ], width=6),
+     dbc.Col([
+            html.Label("Upload knowledge files (.txt/.md)"),
+            dcc.Upload(
+                id="file-upload",
+                children=html.Div(["Drag and drop or click to upload"]),
+                multiple=True,
+                style={
+                    "width": "100%", "height": "38px", "lineHeight": "38px",
+                    "borderWidth": "1px", "borderStyle": "dashed",
+                    "borderRadius": "6px", "textAlign": "center"
+                },
+            ),
+            html.Small(id="upload-status", className="text-muted"),
         ], width=6),
     ], className="mb-3"),
 
@@ -102,6 +118,19 @@ app.layout = dbc.Container([
         ])
     ),
 ], fluid=True)
+
+@app.callback(
+    Output("upload-status", "children"),
+    Input("file-upload", "contents"),
+    State("file-upload", "filename"),
+    prevent_initial_call=True
+)
+def on_upload(contents, filenames):
+    try:
+        n = ingest_uploaded_files(contents or [], filenames or [])
+        return f"Indexed {n} chunks from {len(filenames or [])} file(s)."
+    except Exception as e:
+        return f"Upload failed: {e}"
 
 def render_chat(messages):
     children = []
@@ -150,10 +179,16 @@ def on_send(n_clicks, user_text, messages, endpoint_name):
 
     chat_llm = get_chat_llm(endpoint_name)
 
+    # Retrieve RAG context
+    try:
+        rag_context = retrieve_context(user_text, k=5)
+    except Exception as _:
+        rag_context = ""
+
     for attempt in range(1, MAX_SQL_RETRIES + 1):
         try:
             if attempt == 1:
-                sql_candidate = generate_sql(user_text, schema_text, chat_llm)
+                sql_candidate = generate_sql(user_text, schema_text, chat_llm, context=rag_context)
             else:
                 sql_candidate = refine_sql(user_text, schema_text, sql_final, last_error or "Unknown error", chat_llm)
 
@@ -177,7 +212,7 @@ def on_send(n_clicks, user_text, messages, endpoint_name):
             answer = "No rows returned. Try refining your question."
         else:
             table = df_to_table(df)
-            answer = summarize_answer(user_text, df, chat_llm)
+            answer = summarize_answer(user_text, df, chat_llm, context=rag_context)
     except Exception as e:
         table = html.Div()
         answer = f"Error: {e}"

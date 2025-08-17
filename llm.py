@@ -4,6 +4,7 @@ from typing import List
 import pandas as pd
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
+from typing import List, Optional
 from langchain_community.chat_models import ChatDatabricks
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -41,17 +42,19 @@ def first_statement(sql_text: str) -> str:
 def ensure_limit(sql_text: str, limit: int = 200) -> str:
     return sql_text if re.search(r"\blimit\s+\d+\b", sql_text, flags=re.I) else f"{sql_text} LIMIT {limit}"
 
-def generate_sql(question: str, schema_text: str, llm: ChatDatabricks) -> str:
+def generate_sql(question: str, schema_text: str, llm: ChatDatabricks, context: Optional[str] = None) -> str:
+    ctx = f"\n\nRelevant context:\n{context}" if context else ""
     messages = [
         SystemMessage(content=(
             "You are a Databricks SQL expert. Write ONE single SQL statement for Databricks SQL. "
             "Use only samples.nyctaxi.trips. Return ONLY the SQL in a fenced ```sql block. "
             "Do NOT include multiple statements; exactly one SELECT."
         )),
-        HumanMessage(content=f"Schema:\n{schema_text}\n\nQuestion:\n{question}")
+        HumanMessage(content=f"Schema:\n{schema_text}{ctx}\n\nQuestion:\n{question}")
     ]
     raw = llm.invoke(messages)
     return extract_sql(raw.content)
+
 
 def refine_sql(question: str, schema_text: str, prev_sql: str, error_text: str, llm: ChatDatabricks) -> str:
     messages = [
@@ -68,15 +71,16 @@ def refine_sql(question: str, schema_text: str, prev_sql: str, error_text: str, 
     raw = llm.invoke(messages)
     return extract_sql(raw.content)
 
-def summarize_answer(question: str, df: pd.DataFrame, llm: ChatDatabricks) -> str:
+def summarize_answer(question: str, df: pd.DataFrame, llm: ChatDatabricks, context: Optional[str] = None) -> str:
     sample = df.head(10)
     csv_preview = sample.to_csv(index=False)
+    ctx = f"\n\nAdditional context:\n{context}" if context else ""
     messages = [
         SystemMessage(content=(
-            "You are a helpful analyst. Answer concisely based only on the provided CSV preview. "
-            "If insufficient, say so."
+            "You are a helpful analyst. Answer concisely based only on the provided CSV preview "
+            "and optional additional context. If insufficient, say so."
         )),
-        HumanMessage(content=f"Question:\n{question}\n\nCSV preview (up to 10 rows):\n{csv_preview}")
+        HumanMessage(content=f"Question:\n{question}\n\nCSV preview (up to 10 rows):\n{csv_preview}{ctx}")
     ]
     resp = llm.invoke(messages)
     return resp.content
